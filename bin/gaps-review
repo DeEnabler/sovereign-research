@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# gaps-review — analyze deep-research outbox for extract gaps and retriever coverage.
+# Usage: gaps-review [outbox/slug-dir]
+set -euo pipefail
+
+OUTBOX_ROOT="${RESEARCH_OUTBOX:-/workspace/outbox}"
+TARGET="${1:-}"
+
+python3 - "$OUTBOX_ROOT" "$TARGET" <<'PY'
+import json
+import os
+import sys
+from collections import Counter
+from pathlib import Path
+
+outbox_root = Path(sys.argv[1])
+target = sys.argv[2].strip() if len(sys.argv) > 2 else ""
+
+if target:
+    out_dir = Path(target)
+    if not out_dir.is_absolute():
+        out_dir = outbox_root / target
+else:
+    dirs = sorted(
+        [p for p in outbox_root.iterdir() if p.is_dir()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not dirs:
+        print("FAIL: no outbox directories", file=sys.stderr)
+        sys.exit(1)
+    out_dir = dirs[0]
+
+sources_path = out_dir / "sources.json"
+if not sources_path.exists():
+    print(f"FAIL: {sources_path} not found", file=sys.stderr)
+    sys.exit(1)
+
+with open(sources_path) as f:
+    data = json.load(f)
+
+sources = data.get("sources") or []
+topic = data.get("topic") or ""
+
+extract_failures = []
+snippet_only = 0
+coverage = Counter()
+
+for s in sources:
+    ret = s.get("retriever") or "web"
+    coverage[ret] += 1
+    full = (s.get("full_text") or "").strip()
+    url = (s.get("url") or "").strip()
+    if not full:
+        snippet_only += 1
+    if url and not full and url in [u for u in (data.get("extract_failures") or [])]:
+        extract_failures.append(url)
+
+# Also scan report for explicit extract failure list
+report_path = out_dir / "report.md"
+if report_path.exists():
+    text = report_path.read_text()
+    in_gaps = False
+    for line in text.splitlines():
+        if line.strip().startswith("## Gaps"):
+            in_gaps = True
+            continue
+        if in_gaps and line.startswith("## "):
+            break
+        if in_gaps and line.strip().startswith("- http"):
+            u = line.strip().lstrip("- ").strip()
+            if u not in extract_failures:
+                extract_failures.append(u)
+
+checklist = [
+    "Read extract failures before synthesizing",
+    "Flag claims backed only by snippets (no full_text)",
+    "Cite primary URLs — not social thread summaries",
+]
+if coverage.get("arxiv", 0) == 0 and coverage.get("scholar", 0) == 0:
+    checklist.append("Note: no academic retriever hits — web-only coverage")
+if coverage.get("github", 0) == 0:
+    checklist.append("Note: no GitHub retriever hits — code/repo landscape may be thin")
+
+gaps = {
+    "topic": topic,
+    "outbox_dir": str(out_dir),
+    "extract_failures": extract_failures,
+    "snippet_only_sources": snippet_only,
+    "retriever_coverage": dict(coverage),
+    "checklist": checklist,
+}
+
+gaps_path = out_dir / "gaps.json"
+with open(gaps_path, "w") as f:
+    json.dump(gaps, f, indent=2)
+
+print(f">> gaps-review: {out_dir.name}")
+print(f">> retriever coverage: {dict(coverage)}")
+print(f">> snippet-only sources: {snippet_only}")
+if extract_failures:
+    print(f">> extract failures: {len(extract_failures)}")
+    for u in extract_failures[:5]:
+        print(f"   - {u}")
+print(">> checklist:")
+for c in checklist:
+    print(f"   - {c}")
+print(f">> wrote {gaps_path}")
+PY

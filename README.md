@@ -13,7 +13,8 @@ Default agent research tools (Tavily, Exa, etc.) are SaaS — quota caps, vendor
 - **Local `/search`** via SearXNG (aggregated web results)
 - **Local `/extract`** (page content for RAG / synthesis)
 - **Tavily-compatible wire format** — set `TAVILY_BASE_URL` and keep your existing agent code
-- **Harness scripts** — `web-search` and `deep-research` for deterministic multi-step research with archived reports
+- **Harness scripts** — `web-search`, `deep-research`, specialist retrievers (arXiv, Scholar, GitHub), `gaps-review`
+- **Rerank enabled** — ms-marco cross-encoder for better result ordering
 
 ## Architecture
 
@@ -100,7 +101,9 @@ See `docker-compose.agent.yml` for a full example.
 |------|---------|
 | `oriosearch/` | Docker overlay + config for OrioSearch (clones upstream on install) |
 | `bin/web-search` | One-shot CLI search against local API |
-| `bin/deep-research` | Multi-query research → `workspace/outbox/` reports |
+| `bin/deep-research` | Multi-retriever research → `workspace/outbox/` + `gaps.json` |
+| `bin/arxiv-search`, `scholar-search`, `github-search` | Specialist retrievers |
+| `bin/gaps-review` | Post-run checklist for synthesis |
 | `hermes/` | Agent persona, config, skill for Hermes gateway |
 | `scripts/install-orio.sh` | Clone upstream + `docker compose up` |
 | `scripts/smoke.sh` | Health + search + harness checks |
@@ -111,7 +114,7 @@ See `docker-compose.agent.yml` for a full example.
 
 - SearXNG backend (no Google API keys required)
 - Auth off (`TAVILY_API_KEY=local` works)
-- Rerank off (saves RAM)
+- Rerank on (`ms-marco-MiniLM-L-12-v2`); API container 768m RAM, 1 worker
 - Redis cache on
 
 Adjust memory limits in `oriosearch/docker-compose.yml` for your host (defaults: API 512m, SearXNG 256m, Redis 128m).

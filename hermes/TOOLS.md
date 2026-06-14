@@ -4,14 +4,18 @@
 
 | Env (in hermes/.env) | Value |
 |----------------------|-------|
-| `TAVILY_BASE_URL` | `http://orio-search-api:8000` (Docker) or `http://127.0.0.1:8000` (host) |
+| `TAVILY_BASE_URL` | `http://orio-search-api:8000` (Docker network to OrioSearch) |
 | `TAVILY_API_KEY` | `local` (dummy; local stack, auth off) |
 | `ORIOSEARCH_URL` | same as TAVILY_BASE_URL (for harness scripts) |
+| `S2_API_KEY` | optional — Semantic Scholar rate limits |
+| `GITHUB_TOKEN` | optional — GitHub search rate limits |
 
-Health check:
+Rerank is **enabled** (`ms-marco-MiniLM-L-12-v2`). API container: 768m RAM, 1 gunicorn worker.
+
+Health check from container:
 
 ```bash
-curl -sS --max-time 10 "${ORIOSEARCH_URL:-http://127.0.0.1:8000}/health"
+curl -sS --max-time 10 "${ORIOSEARCH_URL:-http://orio-search-api:8000}/health"
 ```
 
 ## Harness scripts
@@ -22,7 +26,7 @@ curl -sS --max-time 10 "${ORIOSEARCH_URL:-http://127.0.0.1:8000}/health"
 web-search "query" [--max 8]
 ```
 
-Calls OrioSearch `/search`. Prints ranked URLs + snippets to stdout.
+Calls OrioSearch `/search`. Prints ranked URLs + snippets.
 
 ### deep-research
 
@@ -30,35 +34,56 @@ Calls OrioSearch `/search`. Prints ranked URLs + snippets to stdout.
 deep-research "topic" [--depth quick|deep]
 ```
 
-Runs multi-query search, extracts top pages, writes:
+Multi-retriever recall (web + arxiv + scholar + github), extract, report, gaps-review.
+
+Output:
 
 ```
 /workspace/outbox/<timestamp>-<slug>/
-  sources.json
+  sources.json      # retriever tags per source
   report.md
   queries.txt
+  gaps.json         # checklist for synthesis
 ```
 
-`--depth quick`: 3 sub-queries, 5 URLs each.  
-`--depth deep`: 6 sub-queries, 8 URLs each, more extract passes.
+### Specialist retrievers
+
+```bash
+arxiv-search "query" [--max N]      # no key
+scholar-search "query" [--max N]    # optional S2_API_KEY
+github-search "query" [--max N]     # optional GITHUB_TOKEN
+```
+
+### gaps-review
+
+```bash
+gaps-review [outbox/slug-dir]
+```
+
+Analyzes latest (or given) outbox dir; writes `gaps.json`.
 
 ## Hermes native web tools
 
 With `web.search_backend: tavily` and `extract_backend: tavily`, Hermes `web_search`
 and `web_extract` hit the **local** OrioSearch instance (not api.tavily.com).
 
-**Important:** Do not add `browser` to `disabled_toolsets` — Hermes also removes
-`web_search` when the browser toolset is disabled.
+**Harness-first:** run `web-search` or `deep-research` before native web tools.
+
+**Do not** add `browser` to `disabled_toolsets` — Hermes also removes `web_search`.
 
 ## Outbox
 
-Container path: `/workspace/outbox/`
+Host path: `/srv/agents/research/workspace/outbox/`  
+Container: `/workspace/outbox/`
+
+## Quota
+
+Shared `OPENROUTER_API_KEY` + Headroom. On 429: one-line message, stop.
 
 ## Deploy / recreate
 
 ```bash
-hermes gateway run   # or your process manager
-# After config.yaml or .env change, restart the gateway.
+agentctl recreate research   # after config.yaml or .env change
 ```
 
-Scripts and skills reload without recreate when only SOUL/skills/bin change.
+New bins: scp to `/srv/agents/research/bin/` and `chmod +x`.

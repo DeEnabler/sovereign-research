@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# github-search — GitHub repository search (optional GITHUB_TOKEN for rate limits).
+# Usage: github-search "query" [--max N]
+# JSON mode: github-search --json "query" [--max N]
+set -euo pipefail
+
+MAX=5
+QUERY=""
+JSON_MODE=0
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max) MAX="${2:?}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [[ -z "$QUERY" ]]; then QUERY="$1"; else QUERY="$QUERY $1"; fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$QUERY" ]]; then
+  echo "Usage: github-search [--json] \"query\" [--max N]" >&2
+  exit 1
+fi
+
+export QUERY MAX JSON_MODE GITHUB_TOKEN
+
+python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.parse
+import urllib.request
+
+query = os.environ["QUERY"].strip()
+max_r = min(max(int(os.environ.get("MAX", "5")), 1), 20)
+json_mode = os.environ.get("JSON_MODE") == "1"
+token = os.environ.get("GITHUB_TOKEN", "").strip()
+
+params = urllib.parse.urlencode({
+    "q": query,
+    "sort": "stars",
+    "order": "desc",
+    "per_page": max_r,
+})
+url = f"https://api.github.com/search/repositories?{params}"
+
+headers = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "sovereign-research/1.0",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+if token:
+    headers["Authorization"] = f"Bearer {token}"
+
+req = urllib.request.Request(url, headers=headers)
+
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode())
+except Exception as e:
+    if json_mode:
+        print("[]")
+        sys.exit(0)
+    print(f"WARN: github API: {e}", file=sys.stderr)
+    sys.exit(0)
+
+hits = []
+for r in data.get("items") or []:
+    html_url = (r.get("html_url") or "").strip()
+    if not html_url:
+        continue
+    desc = (r.get("description") or "").strip()
+    stars = r.get("stargazers_count", 0)
+    hits.append({
+        "title": (r.get("full_name") or r.get("name") or "").strip(),
+        "url": html_url,
+        "snippet": f"{desc} (stars: {stars})"[:500],
+        "retriever": "github",
+    })
+
+if json_mode:
+    print(json.dumps(hits, ensure_ascii=False))
+    sys.exit(0)
+
+print(f">> github-search: {query} (max={max_r})")
+if not token:
+    print(">> note: set GITHUB_TOKEN for higher rate limits")
+print(f">> {len(hits)} result(s)\n")
+for i, h in enumerate(hits, 1):
+    print(f"{i}. {h['title']}")
+    print(f"   {h['url']}")
+    print(f"   retriever: github")
+    if h.get("snippet"):
+        print(f"   {h['snippet'][:400]}")
+    print()
+PY

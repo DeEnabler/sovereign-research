@@ -28,4 +28,7 @@ curl -sf --max-time 30 -X POST "$ORIO_URL/search" \
 WS_OUT=$(web-search "sovereign search smoke" --max 2 2>&1) || true
 echo "$WS_OUT" | grep -q '>>' && pass "web-search harness" || fail "web-search harness"
 
+ARX_OUT=$(arxiv-search "agent frameworks" --max 2 2>&1) || true
+echo "$ARX_OUT" | grep -q '>>' && pass "arxiv-search harness" || fail "arxiv-search harness"
+
 echo "=== smoke done ==="

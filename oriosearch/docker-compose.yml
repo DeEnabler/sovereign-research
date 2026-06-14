@@ -39,7 +39,8 @@ services:
     build: .
     container_name: orio-search-api
     restart: unless-stopped
-    mem_limit: 512m
+    # Rerank loads ms-marco per worker — 1 worker + 768m avoids OOM on ~4GB VPS
+    mem_limit: 768m
     ports:
       - "8000:8000"
     volumes:
@@ -56,7 +57,7 @@ services:
       - --worker-class
       - uvicorn.workers.UvicornWorker
       - --workers
-      - "2"
+      - "1"
       - --bind
       - 0.0.0.0:8000
       - --timeout

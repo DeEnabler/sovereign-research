@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# arxiv-search — query arXiv Atom API (no API key required).
+# Usage: arxiv-search "query" [--max N]
+# JSON mode (for harness): arxiv-search --json "query" [--max N]
+set -euo pipefail
+
+MAX=5
+QUERY=""
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max) MAX="${2:?}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [[ -z "$QUERY" ]]; then QUERY="$1"; else QUERY="$QUERY $1"; fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$QUERY" ]]; then
+  echo "Usage: arxiv-search [--json] \"query\" [--max N]" >&2
+  exit 1
+fi
+
+export QUERY MAX JSON_MODE
+
+python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+query = os.environ["QUERY"].strip()
+max_r = min(max(int(os.environ.get("MAX", "5")), 1), 20)
+json_mode = os.environ.get("JSON_MODE") == "1"
+
+ns = {"a": "http://www.w3.org/2005/Atom"}
+params = urllib.parse.urlencode({
+    "search_query": f"all:{query}",
+    "start": 0,
+    "max_results": max_r,
+    "sortBy": "relevance",
+    "sortOrder": "descending",
+})
+url = f"https://export.arxiv.org/api/query?{params}"
+
+try:
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        root = ET.fromstring(resp.read())
+except Exception as e:
+    print(f"FAIL: arxiv API: {e}", file=sys.stderr)
+    sys.exit(1)
+
+hits = []
+for entry in root.findall("a:entry", ns):
+    title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip().replace("\n", " ")
+    aid = (entry.findtext("a:id", default="", namespaces=ns) or "").strip()
+    summary = (entry.findtext("a:summary", default="", namespaces=ns) or "").strip().replace("\n", " ")[:500]
+    if not aid:
+        continue
+    hits.append({
+        "title": title,
+        "url": aid,
+        "snippet": summary,
+        "retriever": "arxiv",
+    })
+
+if json_mode:
+    print(json.dumps(hits, ensure_ascii=False))
+    sys.exit(0)
+
+print(f">> arxiv-search: {query} (max={max_r})")
+print(f">> {len(hits)} result(s)\n")
+for i, h in enumerate(hits, 1):
+    print(f"{i}. {h['title']}")
+    print(f"   {h['url']}")
+    print(f"   retriever: arxiv")
+    if h.get("snippet"):
+        print(f"   {h['snippet'][:400]}")
+    print()
+PY

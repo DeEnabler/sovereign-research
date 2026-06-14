@@ -8,6 +8,7 @@ ORIOSEARCH_URL="${ORIOSEARCH_URL%/}"
 API_KEY="${TAVILY_API_KEY:-local}"
 OUTBOX_ROOT="${RESEARCH_OUTBOX:-/workspace/outbox}"
 DEPTH="quick"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 TOPIC=""
 while [[ $# -gt 0 ]]; do
@@ -26,16 +27,18 @@ if [[ -z "$TOPIC" ]]; then
   exit 1
 fi
 
-export ORIOSEARCH_URL API_KEY TOPIC DEPTH OUTBOX_ROOT
+export ORIOSEARCH_URL API_KEY TOPIC DEPTH OUTBOX_ROOT SCRIPT_DIR
+export S2_API_KEY="${S2_API_KEY:-}"
+export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
 python3 - <<'PY'
 import json
 import os
 import re
+import subprocess
 import sys
-import time
-import urllib.error
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 
 BASE = os.environ["ORIOSEARCH_URL"].rstrip("/")
@@ -43,6 +46,7 @@ API_KEY = os.environ.get("API_KEY", "local")
 TOPIC = os.environ["TOPIC"].strip()
 DEPTH = os.environ.get("DEPTH", "quick")
 OUTBOX_ROOT = os.environ.get("OUTBOX_ROOT", "/workspace/outbox")
+SCRIPT_DIR = os.environ.get("SCRIPT_DIR", "/usr/local/agent-bin")
 
 if DEPTH == "deep":
     sub_count, per_query = 6, 8
@@ -94,7 +98,46 @@ def search(query: str, limit: int) -> list[dict]:
     except Exception as e:
         print(f"WARN: search failed for {query!r}: {e}", file=sys.stderr)
         return []
-    return data.get("results") or []
+    hits = []
+    for r in data.get("results") or []:
+        url = (r.get("url") or "").strip()
+        if not url:
+            continue
+        hits.append({
+            "url": url,
+            "title": (r.get("title") or "").strip(),
+            "snippet": (r.get("content") or r.get("snippet") or "").strip()[:800],
+            "query": query,
+            "retriever": "web",
+        })
+    return hits
+
+
+def run_retriever(script: str, query: str, limit: int) -> list[dict]:
+    path = os.path.join(SCRIPT_DIR, script)
+    if not os.path.isfile(path):
+        return []
+    try:
+        out = subprocess.run(
+            [path, "--json", query, "--max", str(limit)],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        if out.returncode != 0 and not out.stdout.strip():
+            print(f"WARN: {script} failed: {out.stderr[:200]}", file=sys.stderr)
+            return []
+        raw = out.stdout.strip()
+        if not raw:
+            return []
+        items = json.loads(raw)
+        for it in items:
+            it["query"] = query
+        return items
+    except Exception as e:
+        print(f"WARN: {script}: {e}", file=sys.stderr)
+        return []
 
 
 def extract_urls(urls: list[str]) -> list[dict]:
@@ -111,6 +154,18 @@ def extract_urls(urls: list[str]) -> list[dict]:
     return out if isinstance(out, list) else []
 
 
+def rank_hits(hits: list[dict]) -> list[dict]:
+    specialist = {"arxiv", "scholar", "github"}
+
+    def score(h: dict) -> tuple:
+        ret = h.get("retriever") or "web"
+        spec_bonus = 1 if ret in specialist else 0
+        snip_len = len(h.get("snippet") or "")
+        return (spec_bonus, snip_len)
+
+    return sorted(hits, key=score, reverse=True)
+
+
 slug = slugify(TOPIC)
 ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 out_dir = os.path.join(OUTBOX_ROOT, f"{ts}-{slug}")
@@ -124,24 +179,30 @@ print(f">> deep-research: {TOPIC}")
 print(f">> depth={DEPTH} queries={len(queries)} per_query={per_query}")
 print(f">> outbox: {out_dir}")
 
-for q in queries:
-    print(f">> search: {q}")
-    for r in search(q, per_query):
-        url = (r.get("url") or "").strip()
+# Specialist retrievers on main topic only
+spec_limit = 5 if DEPTH == "deep" else 3
+for script in ("arxiv-search", "scholar-search", "github-search"):
+    print(f">> {script}: {TOPIC}")
+    for h in run_retriever(script, TOPIC, spec_limit):
+        url = (h.get("url") or "").strip()
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        all_hits.append(
-            {
-                "url": url,
-                "title": (r.get("title") or "").strip(),
-                "snippet": (r.get("content") or r.get("snippet") or "").strip()[:800],
-                "query": q,
-            }
-        )
+        all_hits.append(h)
 
-# Rank: longer snippets first (cheap proxy for relevance)
-all_hits.sort(key=lambda x: len(x.get("snippet") or ""), reverse=True)
+for q in queries:
+    print(f">> search: {q}")
+    for h in search(q, per_query):
+        url = h["url"]
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        all_hits.append(h)
+
+all_hits = rank_hits(all_hits)
+coverage = Counter(h.get("retriever") or "web" for h in all_hits)
+print(f">> retriever coverage: {dict(coverage)}")
+
 top_urls = [h["url"] for h in all_hits[: (12 if DEPTH == "deep" else 8)]]
 
 print(f">> extracting {len(top_urls)} URL(s)")
@@ -156,33 +217,41 @@ gaps = []
 for hit in all_hits:
     u = hit["url"]
     hit["full_text"] = by_url.get(u, "")
-    if top_urls and u in top_urls and not hit["full_text"]:
+    if u in top_urls and not hit["full_text"]:
         gaps.append(u)
 
 sources_path = os.path.join(out_dir, "sources.json")
 with open(sources_path, "w") as f:
-    json.dump({"topic": TOPIC, "queries": queries, "sources": all_hits}, f, indent=2)
+    json.dump({
+        "topic": TOPIC,
+        "queries": queries,
+        "retriever_coverage": dict(coverage),
+        "sources": all_hits,
+        "extract_failures": gaps,
+    }, f, indent=2)
 
 queries_path = os.path.join(out_dir, "queries.txt")
 with open(queries_path, "w") as f:
     f.write("\n".join(queries) + "\n")
 
-# Build report (deterministic synthesis scaffold — LLM in Telegram expands)
 lines = [
     f"# Research: {TOPIC}",
-    f"",
+    "",
     f"Generated: {ts} UTC | depth: {DEPTH}",
     f"Local stack: OrioSearch @ {BASE}",
-    f"",
-    f"## Queries",
+    f"Retriever coverage: {dict(coverage)}",
+    "",
+    "## Queries",
     *[f"- {q}" for q in queries],
-    f"",
+    "",
     f"## Sources ({len(all_hits)} unique URLs)",
 ]
 
 for i, h in enumerate(all_hits[:20], 1):
+    ret = h.get("retriever") or "web"
     lines.append(f"### {i}. {h.get('title') or 'Untitled'}")
     lines.append(f"- URL: {h['url']}")
+    lines.append(f"- Retriever: {ret}")
     lines.append(f"- Found via: {h.get('query', '')}")
     snip = (h.get("snippet") or "").strip()
     if snip:
@@ -205,7 +274,7 @@ else:
 
 lines.append("")
 lines.append("## Next step")
-lines.append("Hermes agent: synthesize this report for Telegram with citations; do not add facts not present above.")
+lines.append("Run gaps-review, read gaps.json, then synthesize for Telegram with citations only from sources above.")
 
 report_path = os.path.join(out_dir, "report.md")
 with open(report_path, "w") as f:
@@ -214,5 +283,10 @@ with open(report_path, "w") as f:
 print(f">> wrote {report_path}")
 print(f">> wrote {sources_path}")
 print(f">> sources: {len(all_hits)} | extracted: {len(by_url)}")
-print(">> deep-research done")
 PY
+
+# gaps-review at end
+export RESEARCH_OUTBOX="$OUTBOX_ROOT"
+"$SCRIPT_DIR/gaps-review" || true
+
+echo ">> deep-research done"

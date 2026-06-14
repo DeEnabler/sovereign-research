@@ -35,8 +35,9 @@ rate_limit:
   search_rate: "30/minute"
   extract_rate: "30/minute"
 
+# If OOM: set enabled: false and restore docker-compose workers=2 mem_limit=512m
 rerank:
-  enabled: false
+  enabled: true
   model: "ms-marco-MiniLM-L-12-v2"
   top_k: 5
 
