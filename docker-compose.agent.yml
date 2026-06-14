@@ -1,0 +1,38 @@
+# Example: run Hermes research agent beside OrioSearch on one Docker host.
+# Requires: hermes-with-git image (or your Hermes image), .env filled from .env.example
+#
+#   cp .env.example .env   # edit keys
+#   docker compose -f docker-compose.agent.yml up -d
+
+services:
+  hermes:
+    image: hermes-with-git:latest
+    container_name: research-hermes
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TAVILY_BASE_URL: http://orio-search-api:8000
+      TAVILY_API_KEY: local
+      ORIOSEARCH_URL: http://orio-search-api:8000
+      RESEARCH_OUTBOX: /workspace/outbox
+      HERMES_ALLOW_ROOT_GATEWAY: "1"
+    volumes:
+      - ./hermes/config.yaml:/root/.hermes/config.yaml:ro
+      - ./hermes/SOUL.md:/root/.hermes/SOUL.md:ro
+      - ./hermes/TOOLS.md:/root/.hermes/memories/TOOLS.md:ro
+      - ./hermes/skills:/root/.hermes/skills:ro
+      - ./workspace:/workspace
+      - ./bin:/usr/local/agent-bin:ro
+    command: ["hermes", "gateway", "run"]
+    networks:
+      - orio-internal
+    # Start OrioSearch first: ./scripts/install-orio.sh
+
+  # OrioSearch runs via scripts/install-orio.sh (separate compose in oriosearch/upstream).
+
+networks:
+  orio-internal:
+    external: true
+    name: oriosearch_orio-internal

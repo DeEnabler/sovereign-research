@@ -1,0 +1,47 @@
+# Research agent — sovereign web research via local OrioSearch (Tavily-compatible API).
+# Copy to your Hermes agent config path (e.g. ~/.hermes/config.yaml).
+
+provider: openrouter
+model: openai/gpt-4o-mini
+
+max_turns: 60
+
+terminal:
+  backend: local
+  cwd: /workspace
+  timeout: 600
+
+compression:
+  enabled: true
+  threshold: 0.75
+  protect_last_n: 25
+
+# Web enabled — points at local OrioSearch via TAVILY_BASE_URL in .env
+web:
+  search_backend: tavily
+  extract_backend: tavily
+
+agent:
+  disabled_toolsets:
+    # Do NOT list "browser" here — Hermes also drops web_search when browser is
+    # disabled (web_search is in both toolsets). Browser tools stay off unless
+    # the browser toolset is explicitly enabled.
+    - tts
+    - image_gen
+    - computer_use
+    - x_search
+
+display:
+  session_reset:
+    minimal: true
+    message: ""
+  ephemeral_system_ttl: 0
+
+session_reset:
+  mode: both
+  notify: false
+
+telegram:
+  require_mention: false
+  reactions: false
+  allowed_chats: ''

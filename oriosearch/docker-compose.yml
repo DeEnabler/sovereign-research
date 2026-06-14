@@ -1,0 +1,75 @@
+# OrioSearch sovereign search stack — VPS-tuned overlay.
+# Clone vkfolio/orio-search into /srv/agents/oriosearch on the host, then:
+#   cp scripts/oriosearch/docker-compose.yml docker-compose.vps.yml
+#   cp scripts/oriosearch/config.yaml config.yaml
+#   docker compose -f docker-compose.vps.yml up -d --build
+#
+# API only on localhost; SearXNG + Redis stay on internal Docker network.
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: orio-search-searxng
+    restart: unless-stopped
+    mem_limit: 256m
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - orio-internal
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: orio-search-redis
+    restart: unless-stopped
+    mem_limit: 128m
+    networks:
+      - orio-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    container_name: orio-search-api
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yaml:/data/config.yaml:ro
+    depends_on:
+      searxng:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - ORIO_SEARCH_CONFIG=/data/config.yaml
+    entrypoint: ["gunicorn", "app.main:app"]
+    command:
+      - --worker-class
+      - uvicorn.workers.UvicornWorker
+      - --workers
+      - "2"
+      - --bind
+      - 0.0.0.0:8000
+      - --timeout
+      - "60"
+      - --graceful-timeout
+      - "30"
+      - --keep-alive
+      - "5"
+      - --access-logfile
+      - "-"
+    networks:
+      - orio-internal
+
+networks:
+  orio-internal:
+    driver: bridge

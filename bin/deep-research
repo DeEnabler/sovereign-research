@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# deep-research — multi-query local web research → outbox report + sources.json
+# Usage: deep-research "topic" [--depth quick|deep]
+set -euo pipefail
+
+ORIOSEARCH_URL="${ORIOSEARCH_URL:-${TAVILY_BASE_URL:-http://host.docker.internal:8000}}"
+ORIOSEARCH_URL="${ORIOSEARCH_URL%/}"
+API_KEY="${TAVILY_API_KEY:-local}"
+OUTBOX_ROOT="${RESEARCH_OUTBOX:-/workspace/outbox}"
+DEPTH="quick"
+
+TOPIC=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --depth) DEPTH="${2:?}"; shift 2 ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [[ -z "$TOPIC" ]]; then TOPIC="$1"; else TOPIC="$TOPIC $1"; fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$TOPIC" ]]; then
+  echo "Usage: deep-research \"topic\" [--depth quick|deep]" >&2
+  exit 1
+fi
+
+export ORIOSEARCH_URL API_KEY TOPIC DEPTH OUTBOX_ROOT
+
+python3 - <<'PY'
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+BASE = os.environ["ORIOSEARCH_URL"].rstrip("/")
+API_KEY = os.environ.get("API_KEY", "local")
+TOPIC = os.environ["TOPIC"].strip()
+DEPTH = os.environ.get("DEPTH", "quick")
+OUTBOX_ROOT = os.environ.get("OUTBOX_ROOT", "/workspace/outbox")
+
+if DEPTH == "deep":
+    sub_count, per_query = 6, 8
+else:
+    sub_count, per_query = 3, 5
+
+
+def slugify(text: str) -> str:
+    s = text.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")[:60] or "topic"
+
+
+def post(path: str, payload: dict, timeout: int = 90) -> dict:
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{BASE}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def plan_queries(topic: str, n: int) -> list[str]:
+    base = [
+        topic,
+        f"{topic} latest developments 2026",
+        f"{topic} comparison benchmarks",
+        f"{topic} open source self hosted",
+        f"{topic} limitations criticism",
+        f"{topic} best practices architecture",
+    ]
+    return base[:n]
+
+
+def search(query: str, limit: int) -> list[dict]:
+    try:
+        data = post(
+            "/search",
+            {
+                "api_key": API_KEY,
+                "query": query,
+                "max_results": limit,
+                "search_depth": "advanced" if DEPTH == "deep" else "basic",
+            },
+        )
+    except Exception as e:
+        print(f"WARN: search failed for {query!r}: {e}", file=sys.stderr)
+        return []
+    return data.get("results") or []
+
+
+def extract_urls(urls: list[str]) -> list[dict]:
+    if not urls:
+        return []
+    try:
+        data = post("/extract", {"api_key": API_KEY, "urls": urls}, timeout=120)
+    except Exception as e:
+        print(f"WARN: extract failed: {e}", file=sys.stderr)
+        return []
+    out = data.get("results") or data.get("documents") or []
+    if isinstance(out, dict):
+        out = out.get("results", [])
+    return out if isinstance(out, list) else []
+
+
+slug = slugify(TOPIC)
+ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+out_dir = os.path.join(OUTBOX_ROOT, f"{ts}-{slug}")
+os.makedirs(out_dir, exist_ok=True)
+
+queries = plan_queries(TOPIC, sub_count)
+seen_urls: set[str] = set()
+all_hits: list[dict] = []
+
+print(f">> deep-research: {TOPIC}")
+print(f">> depth={DEPTH} queries={len(queries)} per_query={per_query}")
+print(f">> outbox: {out_dir}")
+
+for q in queries:
+    print(f">> search: {q}")
+    for r in search(q, per_query):
+        url = (r.get("url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        all_hits.append(
+            {
+                "url": url,
+                "title": (r.get("title") or "").strip(),
+                "snippet": (r.get("content") or r.get("snippet") or "").strip()[:800],
+                "query": q,
+            }
+        )
+
+# Rank: longer snippets first (cheap proxy for relevance)
+all_hits.sort(key=lambda x: len(x.get("snippet") or ""), reverse=True)
+top_urls = [h["url"] for h in all_hits[: (12 if DEPTH == "deep" else 8)]]
+
+print(f">> extracting {len(top_urls)} URL(s)")
+extracted = extract_urls(top_urls)
+by_url = {}
+for doc in extracted:
+    u = (doc.get("url") or doc.get("source_url") or "").strip()
+    if u:
+        by_url[u] = (doc.get("raw_content") or doc.get("content") or "")[:12000]
+
+gaps = []
+for hit in all_hits:
+    u = hit["url"]
+    hit["full_text"] = by_url.get(u, "")
+    if top_urls and u in top_urls and not hit["full_text"]:
+        gaps.append(u)
+
+sources_path = os.path.join(out_dir, "sources.json")
+with open(sources_path, "w") as f:
+    json.dump({"topic": TOPIC, "queries": queries, "sources": all_hits}, f, indent=2)
+
+queries_path = os.path.join(out_dir, "queries.txt")
+with open(queries_path, "w") as f:
+    f.write("\n".join(queries) + "\n")
+
+# Build report (deterministic synthesis scaffold — LLM in Telegram expands)
+lines = [
+    f"# Research: {TOPIC}",
+    f"",
+    f"Generated: {ts} UTC | depth: {DEPTH}",
+    f"Local stack: OrioSearch @ {BASE}",
+    f"",
+    f"## Queries",
+    *[f"- {q}" for q in queries],
+    f"",
+    f"## Sources ({len(all_hits)} unique URLs)",
+]
+
+for i, h in enumerate(all_hits[:20], 1):
+    lines.append(f"### {i}. {h.get('title') or 'Untitled'}")
+    lines.append(f"- URL: {h['url']}")
+    lines.append(f"- Found via: {h.get('query', '')}")
+    snip = (h.get("snippet") or "").strip()
+    if snip:
+        lines.append(f"- Snippet: {snip[:600]}")
+    body = (h.get("full_text") or "").strip()
+    if body:
+        lines.append("")
+        lines.append(body[:4000])
+        if len(body) > 4000:
+            lines.append("… [truncated]")
+    lines.append("")
+
+lines.append("## Gaps & conflicts")
+if gaps:
+    lines.append("Extract failed or empty for:")
+    for u in gaps:
+        lines.append(f"- {u}")
+else:
+    lines.append("- No extract failures on top-ranked URLs.")
+
+lines.append("")
+lines.append("## Next step")
+lines.append("Hermes agent: synthesize this report for Telegram with citations; do not add facts not present above.")
+
+report_path = os.path.join(out_dir, "report.md")
+with open(report_path, "w") as f:
+    f.write("\n".join(lines))
+
+print(f">> wrote {report_path}")
+print(f">> wrote {sources_path}")
+print(f">> sources: {len(all_hits)} | extracted: {len(by_url)}")
+print(">> deep-research done")
+PY

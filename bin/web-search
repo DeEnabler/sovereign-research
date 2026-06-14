@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# web-search — one-shot query against local OrioSearch (Tavily-compatible /search).
+# Usage: web-search "query" [--max N]
+set -euo pipefail
+
+ORIOSEARCH_URL="${ORIOSEARCH_URL:-${TAVILY_BASE_URL:-http://host.docker.internal:8000}}"
+ORIOSEARCH_URL="${ORIOSEARCH_URL%/}"
+API_KEY="${TAVILY_API_KEY:-local}"
+MAX=8
+
+QUERY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max) MAX="${2:?}"; shift 2 ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [[ -z "$QUERY" ]]; then
+        QUERY="$1"
+      else
+        QUERY="$QUERY $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$QUERY" ]]; then
+  echo "Usage: web-search \"query\" [--max N]" >&2
+  exit 1
+fi
+
+export API_KEY QUERY MAX
+
+payload=$(python3 - <<PY
+import json, os
+print(json.dumps({
+    "api_key": os.environ.get("API_KEY", "local"),
+    "query": os.environ["QUERY"],
+    "max_results": int(os.environ["MAX"]),
+    "search_depth": "basic",
+}))
+PY
+)
+
+echo ">> web-search: $QUERY (max=$MAX)"
+echo ">> API: $ORIOSEARCH_URL/search"
+
+resp=$(curl -sS --max-time 90 -X POST "$ORIOSEARCH_URL/search" \
+  -H "Content-Type: application/json" \
+  -d "$payload") || {
+  echo "FAIL: OrioSearch unreachable at $ORIOSEARCH_URL" >&2
+  exit 1
+}
+
+export RESP="$resp"
+
+python3 - <<'PY'
+import json, os, sys
+
+raw = os.environ.get("RESP", "")
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError:
+    print("FAIL: invalid JSON from OrioSearch", file=sys.stderr)
+    print(raw[:2000], file=sys.stderr)
+    sys.exit(1)
+
+results = data.get("results") or []
+if not results and data.get("answer"):
+    print(">> AI answer (no structured results):")
+    print(data["answer"][:4000])
+    sys.exit(0)
+
+if not results:
+    print(">> No results.")
+    err = data.get("error") or data.get("detail")
+    if err:
+        print(f">> Error: {err}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+print(f">> {len(results)} result(s)\n")
+for i, r in enumerate(results, 1):
+    title = (r.get("title") or "").strip()
+    url = (r.get("url") or "").strip()
+    content = (r.get("content") or r.get("snippet") or "").strip()
+    content = content.replace("\n", " ")[:500]
+    print(f"{i}. {title}")
+    print(f"   {url}")
+    if content:
+        print(f"   {content}")
+    print()
+
+if data.get("answer"):
+    print(">> Summary:")
+    print(data["answer"][:2000])
+PY
