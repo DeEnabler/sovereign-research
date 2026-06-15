@@ -1,74 +1,73 @@
 # Sovereign Research
 
-**Self-hosted web search and extraction for AI agents** — a drop-in replacement for Tavily SaaS, with multi-retriever recall, reranking, and compounding pgvector memory.
+**Self-hosted web search and extraction for AI agents** — Tavily SaaS replaced, multi-retriever recall, owned reranking, compounding pgvector memory, and **Goodresearch-style harness discipline** (write it down, read full text, stare at gaps).
 
-Runs [OrioSearch](https://github.com/vkfolio/orio-search) (SearXNG + Redis + Tavily-compatible API) on your own VPS. Point any agent framework that speaks the Tavily API at your instance — no paid search subscription for the Recall + Read + Rank path.
+Runs [OrioSearch](https://github.com/vkfolio/orio-search) on your VPS. Built for [Hermes Agent](https://github.com/NousResearch/hermes-agent); works with any shell-based agent loop.
 
-Built for [Hermes Agent](https://github.com/NousResearch/hermes-agent); harness scripts work with any shell-based agent loop.
+**Full architecture + Goodresearch mapping:** [docs/Goodresearch.md](docs/Goodresearch.md)
 
-## Phased roadmap (what we actually built)
+---
 
-| Phase | Name | Status | What it does |
-|-------|------|--------|--------------|
-| **1** | Sovereign sidecar | **Done** | OrioSearch on VPS — SearXNG `/search` + `/extract`, Tavily-compatible API |
-| **2** | Hermes native web | **Done** | `web_search` + `web_extract` → local OrioSearch (not api.tavily.com) |
-| **2b** | Harness scripts | **Done** | `web-search`, `deep-research` — deterministic, quota-friendly |
-| **3** | Remember | **Done** | pgvector on **your** Supabase — `memory-recall` before search, `memory-index` after report |
-| **4** | Rank | **Done** | FlashRank reranker (`ms-marco-MiniLM-L-12-v2`) in OrioSearch |
-| **4b** | Multi-retriever | **Done** | arXiv + Semantic Scholar + GitHub merged into `deep-research` |
-| **4c** | Gaps review | **Done** | `gaps-review` + harness-first SOUL — stare at failures before synthesizing |
-| **5** | Freshness + X | **Later** | News/RSS harness; `x_search` when X API key added |
-| — | Skip for v1 | — | OmniSearch, Harness-1, Firecrawl self-host, knowledge graphs, GPU local-deep-research |
+## Status: end-to-end (phases 1–4c)
 
-### Architecture (Recall → Read → Rank → Remember)
+| Phase | What | Status |
+|-------|------|--------|
+| **1** | OrioSearch sidecar (SearXNG + extract + cache) | ✅ |
+| **2** | Hermes `web_search` / `web_extract` → local API | ✅ |
+| **2b** | Harness: `web-search`, `deep-research` | ✅ |
+| **3** | Remember: pgvector on **your** Supabase | ✅ |
+| **4** | Rank: FlashRank reranker | ✅ |
+| **4b** | Multi-retriever: arXiv, Scholar, GitHub | ✅ |
+| **4c** | Gaps review before synthesis | ✅ |
+| **5** | X API, RSS freshness | Later |
+
+**Embeddings:** OpenAI direct (`OPENAI_API_KEY` on research agent only). Chat/reasoning stays on free OpenRouter models.
+
+---
+
+## Recall → Read → Rank → Remember
 
 ```mermaid
-flowchart TB
-  subgraph agent [Hermes research agent]
-    SOUL[Harness-first SOUL]
-    DR[deep-research]
-    GR[gaps-review]
-    MI[memory-index]
-    MR[memory-recall]
-  end
-  subgraph recall [Recall]
-    MEM[(OUR Supabase pgvector)]
-    WEB[OrioSearch SearXNG]
-    ARX[arxiv]
-    SCH[scholar]
-    GH[github]
-  end
-  subgraph orio [OrioSearch]
-    RERANK[rerank]
-    EXT[extract]
-  end
-  SOUL --> DR
-  MR --> MEM
-  DR --> MR
-  DR --> WEB
-  DR --> ARX
-  DR --> SCH
-  DR --> GH
-  WEB --> RERANK
-  DR --> EXT
-  DR --> GR
-  DR --> MI
+flowchart LR
+  MR[memory-recall] --> MEM[(pgvector)]
+  DR[deep-research] --> WEB[OrioSearch]
+  DR --> ARX[arXiv]
+  DR --> SCH[Scholar]
+  DR --> GH[GitHub]
+  WEB --> RERANK[rerank]
+  DR --> EXT[extract]
+  DR --> OUT[outbox]
+  DR --> GR[gaps-review]
+  DR --> MI[memory-index]
   MI --> MEM
 ```
 
-## Why this exists
+| Stage | Job | Implementation |
+|-------|-----|------------------|
+| **Recall** | Find what exists | OrioSearch + arXiv + Scholar + GitHub + prior pgvector memory |
+| **Read** | Full text, not snippets | OrioSearch `/extract` → `full_text` in `sources.json` |
+| **Rank** | Signal first | FlashRank in OrioSearch |
+| **Remember** | Never start from zero | `memory-index` / `memory-recall` on your Supabase |
 
-Default agent research (Tavily, Exa, built-in browsing) is SaaS — quota caps, vendor lock-in, queries on someone else's infra. This stack gives you:
+---
 
-- **Local `/search`** via SearXNG (aggregated web)
-- **Local `/extract`** (page content for synthesis)
-- **Tavily-compatible API** — `TAVILY_BASE_URL` points at OrioSearch
-- **Specialist retrievers** — arXiv, Semantic Scholar, GitHub (no Exa bill)
-- **Rerank** — ms-marco cross-encoder in OrioSearch
-- **Compounding memory** — pgvector on **your** Supabase (not a client project)
-- **Harness discipline** — `deep-research` → `gaps-review` → cited Telegram reply
+## Goodresearch — what we coded from the article
 
-**Replaces Tavily** for search+extract. **Does not replace Exa** (semantic/neural search is a different API).
+Popular “how to actually research” advice (tighten the loop, write everything down, read primary sources, stare at failures). We **operationalize** the parts that belong in code:
+
+| Principle | In this repo |
+|-----------|--------------|
+| Tighten the loop | One-command `deep-research`; no 20-turn web tool chains |
+| Write everything down | `outbox/<slug>/report.md`, `sources.json`, `gaps.json`, `queries.txt` |
+| Read the appendix | Extract `full_text`; SOUL bans snippet-only synthesis |
+| Stare at outputs | `gaps-review` before Telegram reply |
+| Diversify inputs | Four retrievers merged per run |
+| Shannon method | `web-search` (small) vs `deep-research` (full) |
+| Own Rank + Remember | Local rerank + your pgvector — no Tavily rent |
+
+**Left to humans:** pick your own problem (Hamming), Schulman Mode B goal choice, taste training via prediction logs.
+
+---
 
 ## Quick start
 
@@ -85,27 +84,30 @@ cp .env.example .env
 export PATH="$PWD/bin:$PATH"
 web-search "best open source AI agent frameworks" --max 5
 deep-research "sovereign AI agent search" --depth quick
-ls -lt workspace/outbox/   # report.md, sources.json, gaps.json
+cat workspace/outbox/*/gaps.json | head -40
 ```
 
-## Phase 3 — pgvector memory (OUR Supabase only)
+---
 
-Research memory uses **your** Supabase project — **not** a client/tenant DB.
+## Memory (Phase 3)
+
+**Your** Supabase only — never a client/tenant DB.
 
 ```bash
-# 1. Run schema once (Supabase Dashboard → SQL Editor)
-#    scripts/research-memory/schema.sql
-#    Project: yours (e.g. srjtsuqhcusvtgegwcpo) — NOT client recipients/send_logs DB
-
-# 2. Set in .env
+# 1. Run scripts/research-memory/schema.sql in your Supabase SQL editor
+# 2. .env
 RESEARCH_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 RESEARCH_SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-OPENROUTER_API_KEY=your-key   # for embeddings
+OPENAI_API_KEY=sk-...          # embeddings (research agent only)
+OPENROUTER_API_KEY=sk-or-...   # free chat via Headroom
 
 # 3. Automatic in deep-research
-memory-recall "topic"    # before web search
-memory-index             # after report written
+memory-recall "topic"    # before search
+memory-index             # after report
+embed-key-status         # probe embedding path
 ```
+
+---
 
 ## Plug into Tavily clients
 
@@ -117,50 +119,36 @@ export TAVILY_API_KEY=local
 ### Hermes Agent
 
 1. `./scripts/install-orio.sh`
-2. Copy `hermes/` into agent config dir
-3. `hermes/.env`: `TAVILY_BASE_URL=http://orio-search-api:8000`, `TAVILY_API_KEY=local`
-4. `config.yaml`: `web.search_backend: tavily`, `web.extract_backend: tavily`
-5. **Do not** add `browser` to `disabled_toolsets` (drops `web_search`)
-6. Mount `bin/` on PATH (`/usr/local/agent-bin`)
+2. Copy `hermes/` into agent config
+3. `hermes/.env`: `TAVILY_BASE_URL=http://orio-search-api:8000`, `OPENAI_API_KEY` for memory
+4. `config.yaml`: `web.search_backend: tavily` — **do not** disable `browser` toolset (drops `web_search`)
+5. Mount `bin/` on PATH
 
-## What's in the repo
+---
+
+## Repo layout
 
 | Path | Purpose |
 |------|---------|
-| `oriosearch/` | Docker overlay + config (rerank on, 768m RAM) |
-| `bin/web-search` | One-shot OrioSearch search |
-| `bin/deep-research` | Multi-retriever + extract + outbox + gaps + memory |
-| `bin/arxiv-search`, `scholar-search`, `github-search` | Specialist retrievers |
-| `bin/gaps-review` | Post-run synthesis checklist |
-| `bin/memory-recall`, `memory-index` | OUR Supabase pgvector |
-| `scripts/research-memory/schema.sql` | One-time pgvector schema |
-| `hermes/` | SOUL, config, skills |
+| `oriosearch/` | Docker overlay + rerank config |
+| `bin/deep-research` | Full loop: recall → multi-search → extract → outbox → gaps → index |
+| `bin/gaps-review` | Failure/coverage checklist |
+| `bin/memory-*` | pgvector recall/index/reembed |
+| `scripts/research-memory/embed_client.py` | OpenAI-first embeddings |
+| `hermes/SOUL.md` | Harness-first + Goodresearch rules |
 
-## Configuration
+---
 
-`oriosearch/config.yaml`:
+## Skipped (v1)
 
-- SearXNG backend (no Google API keys)
-- Auth off (`TAVILY_API_KEY=local`)
-- Rerank on; API 768m RAM, 1 gunicorn worker
-- Redis cache on
+OmniSearch, Harness-1, Firecrawl self-host, knowledge graphs, Exa replacement, web on shipping bots.
 
-Optional env: `S2_API_KEY`, `GITHUB_TOKEN` for higher API rate limits.
-
-## What we explicitly skip (v1)
-
-- OmniSearch full stack (Celery/MCTS/Playwright ops burden)
-- Harness-1 / GPU retrieval subagents
-- Firecrawl self-host
-- Knowledge graphs
-- Enabling web on shipping/code bots (research agent only)
+---
 
 ## Credits
 
-- [OrioSearch](https://github.com/vkfolio/orio-search) — Tavily-shaped API + SearXNG
-- [SearXNG](https://github.com/searxng/searxng) — metasearch
-- Goodresearch harness discipline — write it down, stare at gaps, diversify inputs
+- [OrioSearch](https://github.com/vkfolio/orio-search) + [SearXNG](https://github.com/searxng/searxng)
+- Recall/Read/Rank/Remember — modular retrieval architecture
+- Goodresearch discipline — harness, outbox, gaps (article/rulebook vibes encoded where they belong)
 
-## License
-
-MIT — see [LICENSE](LICENSE).
+MIT — [LICENSE](LICENSE)
