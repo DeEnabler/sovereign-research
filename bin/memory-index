@@ -41,25 +41,27 @@ if not sources_path.exists():
     print(f"FAIL: {sources_path} not found", file=sys.stderr)
     sys.exit(1)
 
-def getenv(*names):
+def getenv(*names, default=""):
     for n in names:
         v = os.environ.get(n, "").strip()
         if v:
             return v
-    return ""
+    return default
 
 sb_url = getenv("RESEARCH_SUPABASE_URL", "OURS_SUPABASE_URL").rstrip("/")
 sb_key = getenv("RESEARCH_SUPABASE_SERVICE_ROLE_KEY", "OURS_SUPABASE_SERVICE_ROLE_KEY")
-or_key = getenv("OPENROUTER_API_KEY")
-or_base = getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-embed_model = getenv("RESEARCH_EMBED_MODEL", "openai/text-embedding-3-small")
+or_key = getenv("OPENROUTER_API_KEY", "RESEARCH_EMBED_API_KEY")
+or_base = getenv(
+    "RESEARCH_EMBED_BASE_URL", "OPENROUTER_EMBED_BASE_URL",
+    default="https://openrouter.ai/api/v1",
+).rstrip("/")
+embed_model = getenv("RESEARCH_EMBED_MODEL", default="openai/text-embedding-3-small")
 
 if not sb_url or not sb_key:
     print("WARN: RESEARCH_SUPABASE_* / OURS_SUPABASE_* not set — skip index", file=sys.stderr)
     sys.exit(0)
 if not or_key:
-    print("WARN: OPENROUTER_API_KEY not set — skip index", file=sys.stderr)
-    sys.exit(0)
+    print("WARN: OPENROUTER_API_KEY not set — indexing text-only (no embeddings)", file=sys.stderr)
 
 with open(sources_path) as f:
     data = json.load(f)
@@ -143,11 +145,12 @@ for src in sources:
     if len(body) < 80:
         continue
     for chunk in chunk_text(body):
-        try:
-            vec = embed(chunk)
-        except Exception as e:
-            print(f"WARN: embed failed: {e}", file=sys.stderr)
-            continue
+        vec = None
+        if or_key:
+            try:
+                vec = embed(chunk)
+            except Exception as e:
+                print(f"WARN: embed failed, storing text-only: {e}", file=sys.stderr)
         ok = insert_row({
             "report_slug": report_slug,
             "topic": topic,

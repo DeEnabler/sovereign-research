@@ -15,6 +15,12 @@ fi
 
 DB_URL="${OURS_DATABASE_URL:-${RESEARCH_DATABASE_URL:-}}"
 
+if [[ -z "$DB_URL" && -n "${DB_PASS:-}" ]]; then
+  OUR_REF="${OURS_SUPABASE_REF:-srjtsuqhcusvtgegwcpo}"
+  OUR_REGION="${OURS_SUPABASE_REGION:-ap-southeast-1}"
+  DB_URL="postgresql://postgres.${OUR_REF}:${DB_PASS}@aws-0-${OUR_REGION}.pooler.supabase.com:5432/postgres"
+fi
+
 echo "=== apply-research-schema ==="
 echo ">> Target: OUR Supabase (srjtsuqhcusvtgegwcpo) — NOT client fiezodastotdurqyshih"
 echo ">> SQL: $SCHEMA"
