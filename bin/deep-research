@@ -179,6 +179,14 @@ print(f">> deep-research: {TOPIC}")
 print(f">> depth={DEPTH} queries={len(queries)} per_query={per_query}")
 print(f">> outbox: {out_dir}")
 
+# Phase 3 — recall prior research from OUR Supabase pgvector (not client DB)
+prior_memory = run_retriever("memory-recall", TOPIC, 6)
+if prior_memory:
+    print(f">> memory-recall: {len(prior_memory)} prior chunk(s)")
+    mem_path = os.path.join(out_dir, "prior_memory.json")
+    with open(mem_path, "w") as f:
+        json.dump(prior_memory, f, indent=2)
+
 # Specialist retrievers on main topic only
 spec_limit = 5 if DEPTH == "deep" else 3
 for script in ("arxiv-search", "scholar-search", "github-search"):
@@ -241,11 +249,24 @@ lines = [
     f"Local stack: OrioSearch @ {BASE}",
     f"Retriever coverage: {dict(coverage)}",
     "",
+]
+
+if prior_memory:
+    lines.append("## Prior research (pgvector memory — OUR Supabase)")
+    for m in prior_memory[:6]:
+        sim = m.get("similarity", 0)
+        lines.append(f"- [{sim:.2f}] {m.get('title') or m.get('topic') or 'untitled'} ({m.get('report_slug')})")
+        txt = (m.get("chunk_text") or "")[:400]
+        if txt:
+            lines.append(f"  {txt}")
+    lines.append("")
+
+lines.extend([
     "## Queries",
     *[f"- {q}" for q in queries],
     "",
     f"## Sources ({len(all_hits)} unique URLs)",
-]
+])
 
 for i, h in enumerate(all_hits[:20], 1):
     ret = h.get("retriever") or "web"
@@ -285,8 +306,9 @@ print(f">> wrote {sources_path}")
 print(f">> sources: {len(all_hits)} | extracted: {len(by_url)}")
 PY
 
-# gaps-review at end
+# gaps-review + memory-index at end (latest outbox dir)
 export RESEARCH_OUTBOX="$OUTBOX_ROOT"
 "$SCRIPT_DIR/gaps-review" || true
+"$SCRIPT_DIR/memory-index" || true
 
 echo ">> deep-research done"

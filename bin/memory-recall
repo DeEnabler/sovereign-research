@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# memory-recall — query OUR Supabase pgvector for prior research chunks.
+# Usage: memory-recall "topic or question" [--max N]
+# JSON: memory-recall --json "query" [--max N]
+set -euo pipefail
+
+MAX=8
+QUERY=""
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max) MAX="${2:?}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [[ -z "$QUERY" ]]; then QUERY="$1"; else QUERY="$QUERY $1"; fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$QUERY" ]]; then
+  echo "Usage: memory-recall [--json] \"query\" [--max N]" >&2
+  exit 1
+fi
+
+export QUERY MAX JSON_MODE
+
+python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+query = os.environ["QUERY"].strip()
+max_r = min(max(int(os.environ.get("MAX", "8")), 1), 20)
+json_mode = os.environ.get("JSON_MODE") == "1"
+
+def getenv(*names):
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v:
+            return v
+    return ""
+
+sb_url = getenv("RESEARCH_SUPABASE_URL", "OURS_SUPABASE_URL").rstrip("/")
+sb_key = getenv("RESEARCH_SUPABASE_SERVICE_ROLE_KEY", "OURS_SUPABASE_SERVICE_ROLE_KEY")
+or_key = getenv("OPENROUTER_API_KEY")
+or_base = getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+embed_model = getenv("RESEARCH_EMBED_MODEL", "openai/text-embedding-3-small")
+
+if not sb_url or not sb_key:
+    if json_mode:
+        print("[]")
+        sys.exit(0)
+    print("WARN: RESEARCH_SUPABASE_URL / OURS_SUPABASE_* not set — skip memory", file=sys.stderr)
+    sys.exit(0)
+
+if not or_key:
+    if json_mode:
+        print("[]")
+        sys.exit(0)
+    print("WARN: OPENROUTER_API_KEY not set — skip memory", file=sys.stderr)
+    sys.exit(0)
+
+
+def embed(text: str) -> list[float]:
+    payload = json.dumps({"model": embed_model, "input": text[:8000]}).encode()
+    req = urllib.request.Request(
+        f"{or_base}/embeddings",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {or_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode())
+    return data["data"][0]["embedding"]
+
+
+def rpc_match(embedding: list[float]) -> list[dict]:
+    payload = json.dumps({
+        "query_embedding": embedding,
+        "match_count": max_r,
+        "min_similarity": 0.45,
+    }).encode()
+    req = urllib.request.Request(
+        f"{sb_url}/rest/v1/rpc/match_research_chunks",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "apikey": sb_key,
+            "Authorization": f"Bearer {sb_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:500]
+        if "match_research_chunks" in body or e.code in (404, 400):
+            print("WARN: research memory not initialized — run schema.sql on OUR Supabase", file=sys.stderr)
+        else:
+            print(f"WARN: memory recall failed: {e.code} {body}", file=sys.stderr)
+        return []
+
+
+try:
+    vec = embed(query)
+    hits = rpc_match(vec)
+except Exception as e:
+    if json_mode:
+        print("[]")
+        sys.exit(0)
+    print(f"WARN: memory-recall: {e}", file=sys.stderr)
+    sys.exit(0)
+
+if json_mode:
+    print(json.dumps(hits, ensure_ascii=False))
+    sys.exit(0)
+
+print(f">> memory-recall: {query} (max={max_r})")
+print(f">> store: OUR Supabase ({sb_url})")
+if not hits:
+    print(">> No prior research chunks matched.")
+    sys.exit(0)
+print(f">> {len(hits)} chunk(s)\n")
+for i, h in enumerate(hits, 1):
+    sim = h.get("similarity", 0)
+    print(f"{i}. [{sim:.2f}] {h.get('title') or h.get('topic') or 'untitled'}")
+    print(f"   {h.get('url') or ''}")
+    print(f"   report: {h.get('report_slug') or ''}")
+    txt = (h.get("chunk_text") or "")[:300]
+    if txt:
+        print(f"   {txt}")
+    print()
+PY

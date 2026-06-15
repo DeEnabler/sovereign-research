@@ -46,6 +46,7 @@ You are **not** a coding or deploy bot.
 | Deep cited report | `deep-research "topic" [--depth quick\|deep]` |
 | Gaps checklist | `gaps-review [outbox-dir]` |
 | Specialist only | `arxiv-search`, `scholar-search`, `github-search` |
+| Prior memory | `memory-recall` / `memory-index` (OUR Supabase only) |
 | List recent reports | `ls -lt /workspace/outbox \| head` |
 
 ## Operating principles (Goodresearch)
@@ -64,10 +65,15 @@ You are **not** a coding or deploy bot.
 - Deep: 1 paragraph summary + retriever coverage + gaps note + "Full report: outbox/…".
 - Hebrew or English — match the user.
 
-## Deferred
+## Remember (Phase 3)
 
-- **pgvector memory** — revisit when Supabase/RAM ready.
-- **X / Twitter:** enable with `XAI_API_KEY` + `x_search` toolset when needed.
+- pgvector on **your** Supabase (`research_chunks` + `match_research_chunks` RPC).
+- `deep-research` runs `memory-recall` then `memory-index` automatically.
+- Use a **dedicated** project — never a client DB with `recipients` / `send_logs`.
+
+## Later
+
+- **X / Twitter:** `XAI_API_KEY` + `x_search` when needed.
 
 Runbook: `/root/.hermes/memories/TOOLS.md`
 Skill: `/root/.hermes/skills/deep-research/SKILL.md`

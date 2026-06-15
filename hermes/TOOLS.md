@@ -9,6 +9,18 @@
 | `ORIOSEARCH_URL` | same as TAVILY_BASE_URL (for harness scripts) |
 | `S2_API_KEY` | optional — Semantic Scholar rate limits |
 | `GITHUB_TOKEN` | optional — GitHub search rate limits |
+| `RESEARCH_SUPABASE_URL` | **OUR** project (`srjtsuqhcusvtgegwcpo`) — NOT client |
+| `RESEARCH_SUPABASE_SERVICE_ROLE_KEY` | service role for OUR project |
+| `RESEARCH_EMBED_MODEL` | default `openai/text-embedding-3-small` via OpenRouter |
+
+### Supabase projects (do not mix)
+
+| Project | Ref | Tables | Use |
+|---------|-----|--------|-----|
+| **OURS** | `srjtsuqhcusvtgegwcpo` | `allowed_users`, `allowed_phones`, `research_chunks` | routebot + research memory |
+| **CLIENT** | `fiezodastotdurqyshih` | `recipients`, `send_logs` | clawdev only — never research memory |
+
+One-time schema: `scripts/research-memory/schema.sql` on **OUR** dashboard.
 
 Rerank is **enabled** (`ms-marco-MiniLM-L-12-v2`). API container: 768m RAM, 1 gunicorn worker.
 
@@ -60,7 +72,14 @@ github-search "query" [--max N]     # optional GITHUB_TOKEN
 gaps-review [outbox/slug-dir]
 ```
 
-Analyzes latest (or given) outbox dir; writes `gaps.json`.
+### memory-recall / memory-index (Phase 3 — OUR Supabase)
+
+```bash
+memory-recall "query" [--max 8]    # before new research
+memory-index [outbox/slug-dir]     # after deep-research (auto-run)
+```
+
+Requires `RESEARCH_SUPABASE_*` pointing at **OUR** project, not client.
 
 ## Hermes native web tools
 

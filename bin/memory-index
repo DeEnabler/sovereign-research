@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# memory-index — embed outbox report chunks into OUR Supabase pgvector.
+# Usage: memory-index [outbox/slug-dir]
+set -euo pipefail
+
+OUTBOX_ROOT="${RESEARCH_OUTBOX:-/workspace/outbox}"
+TARGET="${1:-}"
+
+export OUTBOX_ROOT TARGET
+
+python3 - <<'PY'
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+import urllib.parse
+from pathlib import Path
+
+outbox_root = Path(os.environ["OUTBOX_ROOT"])
+target = os.environ.get("TARGET", "").strip()
+
+if target:
+    out_dir = Path(target)
+    if not out_dir.is_absolute():
+        out_dir = outbox_root / target
+else:
+    dirs = sorted(
+        [p for p in outbox_root.iterdir() if p.is_dir()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not dirs:
+        print("FAIL: no outbox directories", file=sys.stderr)
+        sys.exit(1)
+    out_dir = dirs[0]
+
+sources_path = out_dir / "sources.json"
+if not sources_path.exists():
+    print(f"FAIL: {sources_path} not found", file=sys.stderr)
+    sys.exit(1)
+
+def getenv(*names):
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v:
+            return v
+    return ""
+
+sb_url = getenv("RESEARCH_SUPABASE_URL", "OURS_SUPABASE_URL").rstrip("/")
+sb_key = getenv("RESEARCH_SUPABASE_SERVICE_ROLE_KEY", "OURS_SUPABASE_SERVICE_ROLE_KEY")
+or_key = getenv("OPENROUTER_API_KEY")
+or_base = getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+embed_model = getenv("RESEARCH_EMBED_MODEL", "openai/text-embedding-3-small")
+
+if not sb_url or not sb_key:
+    print("WARN: RESEARCH_SUPABASE_* / OURS_SUPABASE_* not set — skip index", file=sys.stderr)
+    sys.exit(0)
+if not or_key:
+    print("WARN: OPENROUTER_API_KEY not set — skip index", file=sys.stderr)
+    sys.exit(0)
+
+with open(sources_path) as f:
+    data = json.load(f)
+
+topic = data.get("topic") or ""
+report_slug = out_dir.name
+sources = data.get("sources") or []
+
+def chunk_text(text: str, size: int = 900, overlap: int = 120) -> list[str]:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
+    if len(text) <= size:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunks.append(text[start : start + size])
+        start += size - overlap
+    return chunks
+
+
+def embed(text: str) -> list[float]:
+    payload = json.dumps({"model": embed_model, "input": text[:8000]}).encode()
+    req = urllib.request.Request(
+        f"{or_base}/embeddings",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {or_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        d = json.loads(resp.read().decode())
+    return d["data"][0]["embedding"]
+
+
+def insert_row(row: dict) -> bool:
+    payload = json.dumps(row).encode()
+    req = urllib.request.Request(
+        f"{sb_url}/rest/v1/research_chunks",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "apikey": sb_key,
+            "Authorization": f"Bearer {sb_key}",
+            "Prefer": "return=minimal",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30):
+            return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:400]
+        if "research_chunks" in body:
+            print("WARN: run scripts/research-memory/schema.sql on OUR Supabase first", file=sys.stderr)
+        else:
+            print(f"WARN: insert failed: {e.code} {body}", file=sys.stderr)
+        return False
+
+
+# Remove prior chunks for this report (re-index safe)
+del_req = urllib.request.Request(
+    f"{sb_url}/rest/v1/research_chunks?report_slug=eq.{urllib.parse.quote(report_slug)}",
+    headers={
+        "apikey": sb_key,
+        "Authorization": f"Bearer {sb_key}",
+    },
+    method="DELETE",
+)
+try:
+    urllib.request.urlopen(del_req, timeout=30)
+except Exception:
+    pass
+
+rows = 0
+for src in sources:
+    body = (src.get("full_text") or src.get("snippet") or "").strip()
+    if len(body) < 80:
+        continue
+    for chunk in chunk_text(body):
+        try:
+            vec = embed(chunk)
+        except Exception as e:
+            print(f"WARN: embed failed: {e}", file=sys.stderr)
+            continue
+        ok = insert_row({
+            "report_slug": report_slug,
+            "topic": topic,
+            "url": src.get("url"),
+            "title": src.get("title"),
+            "retriever": src.get("retriever") or "web",
+            "chunk_text": chunk,
+            "embedding": vec,
+        })
+        if ok:
+            rows += 1
+
+print(f">> memory-index: {report_slug}")
+print(f">> store: OUR Supabase ({sb_url})")
+print(f">> indexed {rows} chunk(s)")
+if rows == 0:
+    print("WARN: nothing indexed — check schema or source full_text", file=sys.stderr)
+PY
