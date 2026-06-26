@@ -6,15 +6,31 @@ set -euo pipefail
 OUTBOX_ROOT="${RESEARCH_OUTBOX:-/workspace/outbox}"
 TARGET="${1:-}"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -f "$SCRIPT_DIR/extract_cascade.py" ]]; then
+  EXTRACT_CASCADE="$SCRIPT_DIR/extract_cascade.py"
+else
+  EXTRACT_CASCADE="$(cd "$SCRIPT_DIR/../../research-memory" && pwd)/extract_cascade.py"
+fi
+export EXTRACT_CASCADE
+
 python3 - "$OUTBOX_ROOT" "$TARGET" <<'PY'
+import importlib.util
 import json
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 
+spec = importlib.util.spec_from_file_location("extract_cascade", os.environ["EXTRACT_CASCADE"])
+ec = importlib.util.module_from_spec(spec)
+sys.modules["extract_cascade"] = ec
+spec.loader.exec_module(ec)
+
 outbox_root = Path(sys.argv[1])
 target = sys.argv[2].strip() if len(sys.argv) > 2 else ""
+HARNESS_DIR = re.compile(r"^\d{8}-\d{6}-")
 
 if target:
     out_dir = Path(target)
@@ -22,12 +38,12 @@ if target:
         out_dir = outbox_root / target
 else:
     dirs = sorted(
-        [p for p in outbox_root.iterdir() if p.is_dir()],
+        [p for p in outbox_root.iterdir() if p.is_dir() and HARNESS_DIR.match(p.name)],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
     if not dirs:
-        print("FAIL: no outbox directories", file=sys.stderr)
+        print("FAIL: no harness outbox directories", file=sys.stderr)
         sys.exit(1)
     out_dir = dirs[0]
 
@@ -43,20 +59,29 @@ sources = data.get("sources") or []
 topic = data.get("topic") or ""
 
 extract_failures = []
+thin_content = []
 snippet_only = 0
 coverage = Counter()
+tier_stats = Counter()
 
 for s in sources:
     ret = s.get("retriever") or "web"
     coverage[ret] += 1
     full = (s.get("full_text") or "").strip()
     url = (s.get("url") or "").strip()
+    tier = s.get("extract_tier", 0)
+    tier_stats[tier if tier in (0, 1, 2) else 0] += 1
     if not full:
         snippet_only += 1
+    elif not ec.quality_ok(full):
+        thin_content.append(url)
     if url and not full and url in [u for u in (data.get("extract_failures") or [])]:
         extract_failures.append(url)
 
-# Also scan report for explicit extract failure list
+if not tier_stats and data.get("extract_tier_stats"):
+    for k, v in data["extract_tier_stats"].items():
+        tier_stats[int(k)] = v
+
 report_path = out_dir / "report.md"
 if report_path.exists():
     text = report_path.read_text()
@@ -76,7 +101,10 @@ checklist = [
     "Read extract failures before synthesizing",
     "Flag claims backed only by snippets (no full_text)",
     "Cite primary URLs — not social thread summaries",
+    "Do not cite tier-0 / failed extracts as primary evidence",
 ]
+if thin_content:
+    checklist.append(f"Note: {len(thin_content)} source(s) have thin full_text (nav/boilerplate)")
 if coverage.get("arxiv", 0) == 0 and coverage.get("scholar", 0) == 0:
     checklist.append("Note: no academic retriever hits — web-only coverage")
 if coverage.get("github", 0) == 0:
@@ -86,8 +114,10 @@ gaps = {
     "topic": topic,
     "outbox_dir": str(out_dir),
     "extract_failures": extract_failures,
+    "thin_content_urls": thin_content,
     "snippet_only_sources": snippet_only,
     "retriever_coverage": dict(coverage),
+    "extract_tier_stats": {str(k): v for k, v in sorted(tier_stats.items())},
     "checklist": checklist,
 }
 
@@ -97,7 +127,10 @@ with open(gaps_path, "w") as f:
 
 print(f">> gaps-review: {out_dir.name}")
 print(f">> retriever coverage: {dict(coverage)}")
+print(f">> extract tier stats: {dict(tier_stats)}")
 print(f">> snippet-only sources: {snippet_only}")
+if thin_content:
+    print(f">> thin content: {len(thin_content)}")
 if extract_failures:
     print(f">> extract failures: {len(extract_failures)}")
     for u in extract_failures[:5]:

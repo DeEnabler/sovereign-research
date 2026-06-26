@@ -11,7 +11,8 @@
 | `GITHUB_TOKEN` | optional — GitHub search rate limits |
 | `RESEARCH_SUPABASE_URL` | **OUR** project (`srjtsuqhcusvtgegwcpo`) — NOT client |
 | `RESEARCH_SUPABASE_SERVICE_ROLE_KEY` | service role for OUR project |
-| `RESEARCH_EMBED_MODEL` | default `openai/text-embedding-3-small` via OpenRouter |
+| `RESEARCH_EMBED_MODEL` | `text-embedding-3-small` via **OpenAI direct** (`OPENAI_API_KEY`) or OpenRouter fallback |
+| `OPENAI_API_KEY` | **Research memory only** — never deployed to other agents; chat stays free via Headroom |
 
 ### Supabase projects (do not mix)
 
@@ -46,17 +47,26 @@ Calls OrioSearch `/search`. Prints ranked URLs + snippets.
 deep-research "topic" [--depth quick|deep]
 ```
 
-Multi-retriever recall (web + arxiv + scholar + github), extract, report, gaps-review.
+Multi-retriever recall (web + arxiv + scholar + github), **extract cascade** (trafilatura → Playwright), report, gaps-review.
 
 Output:
 
 ```
 /workspace/outbox/<timestamp>-<slug>/
-  sources.json      # retriever tags per source
+  sources.json      # retriever tags, extract_tier, extract_method per source
   report.md
   queries.txt
-  gaps.json         # checklist for synthesis
+  gaps.json         # checklist + extract_tier_stats for synthesis
+  .gate-ok          # stamp for research-gate
 ```
+
+### research-gate
+
+```bash
+research-gate "topic" [--json]
+```
+
+Code judge — must PASS before Telegram reply. Checks recent harness outbox, gaps.json, ≥3 full_text sources.
 
 ### Specialist retrievers
 

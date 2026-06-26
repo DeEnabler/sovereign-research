@@ -19,6 +19,8 @@ Runs [OrioSearch](https://github.com/vkfolio/orio-search) on your VPS. Built for
 | **4** | Rank: FlashRank reranker | ✅ |
 | **4b** | Multi-retriever: arXiv, Scholar, GitHub | ✅ |
 | **4c** | Gaps review before synthesis | ✅ |
+| **4d** | READ cascade (trafilatura → Playwright) | ✅ |
+| **4e** | `research-gate` code judge (no reply without harness) | ✅ |
 | **5** | X API, RSS freshness | Later |
 
 **Embeddings:** OpenAI direct (`OPENAI_API_KEY` on research agent only). Chat/reasoning stays on free OpenRouter models.
@@ -45,7 +47,7 @@ flowchart LR
 | Stage | Job | Implementation |
 |-------|-----|------------------|
 | **Recall** | Find what exists | OrioSearch + arXiv + Scholar + GitHub + prior pgvector memory |
-| **Read** | Full text, not snippets | OrioSearch `/extract` → `full_text` in `sources.json` |
+| **Read** | Full text, not snippets | `extract_cascade` (trafilatura → Playwright); Orio `/search` only |
 | **Rank** | Signal first | FlashRank in OrioSearch |
 | **Remember** | Never start from zero | `memory-index` / `memory-recall` on your Supabase |
 
@@ -101,10 +103,10 @@ RESEARCH_SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 OPENAI_API_KEY=sk-...          # embeddings (research agent only)
 OPENROUTER_API_KEY=sk-or-...   # free chat via Headroom
 
-# 3. Automatic in deep-research
-memory-recall "topic"    # before search
-memory-index             # after report
-embed-key-status         # probe embedding path
+# 3. Automatic in deep-research; verify before reply:
+deep-research "topic" --depth quick
+research-gate "topic"
+embed-key-status
 ```
 
 ---

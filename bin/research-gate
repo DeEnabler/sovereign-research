@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# research-gate — code judge: deep-research outbox must exist before Telegram reply.
+# Usage: research-gate "user topic query"
+# JSON: research-gate --json "query"
+set -euo pipefail
+
+JSON_MODE=0
+QUERY=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_MODE=1; shift ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [[ -z "$QUERY" ]]; then QUERY="$1"; else QUERY="$QUERY $1"; fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$QUERY" ]]; then
+  echo "Usage: research-gate [--json] \"topic query\"" >&2
+  exit 1
+fi
+
+export QUERY JSON_MODE
+
+python3 - <<'PY'
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+query = os.environ["QUERY"].strip()
+json_mode = os.environ.get("JSON_MODE") == "1"
+outbox_root = Path(os.environ.get("RESEARCH_OUTBOX", "/workspace/outbox"))
+max_age = int(os.environ.get("RESEARCH_GATE_MAX_AGE_SEC", "900"))
+min_full = int(os.environ.get("RESEARCH_GATE_MIN_FULL_TEXT", "3"))
+min_chars = int(os.environ.get("EXTRACT_MIN_CHARS", "200"))
+
+HARNESS_DIR = re.compile(r"^\d{8}-\d{6}-")
+
+
+def slugify(text: str) -> set[str]:
+    s = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    return {w for w in s.split() if len(w) > 2}
+
+
+def topic_match(query: str, topic: str) -> bool:
+    q = slugify(query)
+    t = slugify(topic)
+    if not q or not t:
+        return True
+    overlap = len(q & t)
+    return overlap >= max(1, min(2, len(q) // 3))
+
+
+def fail(code: str, reason: str, actions: str, outbox_dir: str = "") -> None:
+    payload = {
+        "ok": False,
+        "code": code,
+        "reason": reason,
+        "actions": actions,
+        "outbox_dir": outbox_dir,
+    }
+    if json_mode:
+        print(json.dumps(payload))
+    else:
+        print(f"FAIL: {reason}", file=sys.stderr)
+        print(f">> actions: {actions}", file=sys.stderr)
+    sys.exit(0 if json_mode else 1)
+
+
+def pass_gate(outbox_dir: Path, topic: str, full_count: int) -> None:
+    payload = {
+        "ok": True,
+        "code": "verified",
+        "reason": f"research gate passed ({full_count} full_text sources)",
+        "actions": "read gaps.json then synthesize from full_text only",
+        "outbox_dir": str(outbox_dir),
+        "topic": topic,
+        "full_text_sources": full_count,
+    }
+    if json_mode:
+        print(json.dumps(payload))
+    else:
+        print(f"PASS: {payload['reason']}")
+        print(f">> outbox: {outbox_dir}")
+    sys.exit(0)
+
+
+if not outbox_root.is_dir():
+    fail(
+        "no_outbox",
+        "outbox root missing",
+        f'mkdir -p {outbox_root} && deep-research "{query}"',
+    )
+
+candidates = []
+now = time.time()
+for p in outbox_root.iterdir():
+    if not p.is_dir() or not HARNESS_DIR.match(p.name):
+        continue
+    age = now - p.stat().st_mtime
+    if age > max_age:
+        continue
+    candidates.append((p.stat().st_mtime, p))
+
+candidates.sort(key=lambda x: x[0], reverse=True)
+
+if not candidates:
+    fail(
+        "stale_or_missing",
+        f"no harness outbox dir newer than {max_age}s matching YYYYMMDD-HHMMSS-*",
+        f'deep-research "{query}" --depth quick',
+    )
+
+for _, out_dir in candidates:
+    sources_path = out_dir / "sources.json"
+    gaps_path = out_dir / "gaps.json"
+    report_path = out_dir / "report.md"
+    stamp_path = out_dir / ".gate-ok"
+
+    missing = [n for n, p in [
+        ("sources.json", sources_path),
+        ("gaps.json", gaps_path),
+        ("report.md", report_path),
+    ] if not p.exists()]
+    if missing:
+        continue
+
+    try:
+        data = json.loads(sources_path.read_text())
+    except json.JSONDecodeError:
+        continue
+
+    if not isinstance(data, dict) or not isinstance(data.get("sources"), list):
+        continue
+
+    topic = str(data.get("topic") or "")
+    if topic and not topic_match(query, topic):
+        continue
+
+    sources = data["sources"]
+    full_count = sum(
+        1 for s in sources
+        if len((s.get("full_text") or "").strip()) >= min_chars
+    )
+    if full_count < min_full:
+        continue
+
+    if not stamp_path.exists():
+        stamp_path.write_text(f"verified_at={int(now)}\nfull_text_sources={full_count}\n")
+
+    pass_gate(out_dir, topic or query, full_count)
+
+fail(
+    "incomplete",
+    f"no recent outbox with >={min_full} full_text (>={min_chars} chars) matching query",
+    f'deep-research "{query}" --depth quick && cat $(ls -td {outbox_root}/[0-9]*-* | head -1)/gaps.json',
+)
+PY

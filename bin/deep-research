@@ -47,6 +47,8 @@ TOPIC = os.environ["TOPIC"].strip()
 DEPTH = os.environ.get("DEPTH", "quick")
 OUTBOX_ROOT = os.environ.get("OUTBOX_ROOT", "/workspace/outbox")
 SCRIPT_DIR = os.environ.get("SCRIPT_DIR", "/usr/local/agent-bin")
+MAX_TEXT = int(os.environ.get("EXTRACT_MAX_CHARS", "20000"))
+MIN_CHARS = int(os.environ.get("EXTRACT_MIN_CHARS", "200"))
 
 if DEPTH == "deep":
     sub_count, per_query = 6, 8
@@ -140,18 +142,69 @@ def run_retriever(script: str, query: str, limit: int) -> list[dict]:
         return []
 
 
-def extract_urls(urls: list[str]) -> list[dict]:
+def extract_urls_orio(urls: list[str]) -> dict[str, str]:
     if not urls:
-        return []
+        return {}
     try:
         data = post("/extract", {"api_key": API_KEY, "urls": urls}, timeout=120)
     except Exception as e:
-        print(f"WARN: extract failed: {e}", file=sys.stderr)
-        return []
+        print(f"WARN: orio extract failed: {e}", file=sys.stderr)
+        return {}
     out = data.get("results") or data.get("documents") or []
     if isinstance(out, dict):
         out = out.get("results", [])
-    return out if isinstance(out, list) else []
+    by_url = {}
+    for doc in out if isinstance(out, list) else []:
+        u = (doc.get("url") or doc.get("source_url") or "").strip()
+        if u:
+            by_url[u] = (doc.get("raw_content") or doc.get("content") or "")[:MAX_TEXT]
+    return by_url
+
+
+def extract_urls_cascade(urls: list[str]) -> dict[str, dict]:
+    if not urls:
+        return {}
+    cascade_path = os.path.join(SCRIPT_DIR, "extract_cascade.py")
+    if not os.path.isfile(cascade_path):
+        cascade_path = os.path.join(
+            os.path.dirname(os.path.dirname(SCRIPT_DIR)), "research-memory", "extract_cascade.py"
+        )
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("extract_cascade", cascade_path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["extract_cascade"] = mod
+    spec.loader.exec_module(mod)
+
+    results: dict[str, dict] = {}
+    for url in urls:
+        if os.environ.get("EXTRACT_USE_ORIO", "").strip() == "1":
+            orio = extract_urls_orio([url])
+            text = orio.get(url, "")
+            if mod.quality_ok(text):
+                results[url] = {
+                    "full_text": text[:MAX_TEXT],
+                    "extract_tier": 0,
+                    "extract_method": "orio",
+                }
+                continue
+
+        try:
+            r = mod.extract_urls_cascade([url])[0]
+            results[url] = {
+                "full_text": (r.text or "")[:MAX_TEXT],
+                "extract_tier": r.tier,
+                "extract_method": r.method,
+                "extract_error": r.error,
+            }
+        except Exception as e:
+            print(f"WARN: cascade failed for {url}: {e}", file=sys.stderr)
+            results[url] = {
+                "full_text": "",
+                "extract_tier": 0,
+                "extract_method": "failed",
+                "extract_error": str(e),
+            }
+    return results
 
 
 def rank_hits(hits: list[dict]) -> list[dict]:
@@ -213,20 +266,37 @@ print(f">> retriever coverage: {dict(coverage)}")
 
 top_urls = [h["url"] for h in all_hits[: (12 if DEPTH == "deep" else 8)]]
 
-print(f">> extracting {len(top_urls)} URL(s)")
-extracted = extract_urls(top_urls)
-by_url = {}
-for doc in extracted:
-    u = (doc.get("url") or doc.get("source_url") or "").strip()
-    if u:
-        by_url[u] = (doc.get("raw_content") or doc.get("content") or "")[:12000]
+print(f">> extracting {len(top_urls)} URL(s) via cascade (trafilatura → playwright)")
+by_meta = extract_urls_cascade(top_urls)
 
 gaps = []
+tier_stats = Counter()
 for hit in all_hits:
     u = hit["url"]
-    hit["full_text"] = by_url.get(u, "")
-    if u in top_urls and not hit["full_text"]:
-        gaps.append(u)
+    ret = hit.get("retriever") or "web"
+    snippet = (hit.get("snippet") or "").strip()
+    if u in top_urls:
+        if ret in {"arxiv", "scholar", "github"} and len(snippet) >= MIN_CHARS:
+            hit["full_text"] = snippet[:MAX_TEXT]
+            hit["extract_tier"] = 1
+            hit["extract_method"] = "retriever_snippet"
+        else:
+            meta = by_meta.get(u, {})
+            hit["full_text"] = meta.get("full_text", "")
+            hit["extract_tier"] = meta.get("extract_tier", 0)
+            hit["extract_method"] = meta.get("extract_method", "failed")
+            if meta.get("extract_error"):
+                hit["extract_error"] = meta["extract_error"]
+        tier = hit.get("extract_tier", 0)
+        tier_stats[tier if tier in (0, 1, 2) else 0] += 1
+        if not (hit.get("full_text") or "").strip():
+            gaps.append(u)
+    else:
+        hit["full_text"] = snippet[:MAX_TEXT] if len(snippet) >= MIN_CHARS else ""
+        hit["extract_tier"] = 1 if hit["full_text"] else 0
+        hit["extract_method"] = "retriever_snippet" if hit["full_text"] else "none"
+
+print(f">> extract tiers: {dict(tier_stats)}")
 
 sources_path = os.path.join(out_dir, "sources.json")
 with open(sources_path, "w") as f:
@@ -236,6 +306,7 @@ with open(sources_path, "w") as f:
         "retriever_coverage": dict(coverage),
         "sources": all_hits,
         "extract_failures": gaps,
+        "extract_tier_stats": dict(tier_stats),
     }, f, indent=2)
 
 queries_path = os.path.join(out_dir, "queries.txt")
@@ -279,6 +350,9 @@ for i, h in enumerate(all_hits[:20], 1):
         lines.append(f"- Snippet: {snip[:600]}")
     body = (h.get("full_text") or "").strip()
     if body:
+        tier = h.get("extract_tier", "?")
+        method = h.get("extract_method", "?")
+        lines.append(f"- Extract: tier {tier} ({method})")
         lines.append("")
         lines.append(body[:4000])
         if len(body) > 4000:
@@ -303,12 +377,18 @@ with open(report_path, "w") as f:
 
 print(f">> wrote {report_path}")
 print(f">> wrote {sources_path}")
-print(f">> sources: {len(all_hits)} | extracted: {len(by_url)}")
+print(f">> sources: {len(all_hits)} | full_text: {sum(1 for h in all_hits if len((h.get('full_text') or '').strip()) >= MIN_CHARS)}")
 PY
 
 # gaps-review + memory-index at end (latest outbox dir)
 export RESEARCH_OUTBOX="$OUTBOX_ROOT"
 "$SCRIPT_DIR/gaps-review" || true
 "$SCRIPT_DIR/memory-index" || true
+
+# Stamp for research-gate verifier
+LATEST=$(ls -td "$OUTBOX_ROOT"/[0-9]*-* 2>/dev/null | head -1 || true)
+if [[ -n "$LATEST" && -f "$LATEST/sources.json" ]]; then
+  echo "verified_at=$(date -u +%s)" > "$LATEST/.gate-ok"
+fi
 
 echo ">> deep-research done"
