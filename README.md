@@ -59,10 +59,10 @@ Popular “how to actually research” advice (tighten the loop, write everythin
 
 | Principle | In this repo |
 |-----------|--------------|
-| Tighten the loop | One-command `deep-research`; no 20-turn web tool chains |
+| Tighten the loop | `deep-research` + `research-gate` — auto-continue until PASS |
 | Write everything down | `outbox/<slug>/report.md`, `sources.json`, `gaps.json`, `queries.txt` |
-| Read the appendix | Extract `full_text`; SOUL bans snippet-only synthesis |
-| Stare at outputs | `gaps-review` before Telegram reply |
+| Read the appendix | Extract cascade → `full_text`; SOUL bans snippet-only synthesis |
+| Stare at outputs | `gaps.json` + `extract_tier_stats` before Telegram reply |
 | Diversify inputs | Four retrievers merged per run |
 | Shannon method | `web-search` (small) vs `deep-research` (full) |
 | Own Rank + Remember | Local rerank + your pgvector — no Tavily rent |
@@ -133,9 +133,11 @@ export TAVILY_API_KEY=local
 | Path | Purpose |
 |------|---------|
 | `oriosearch/` | Docker overlay + rerank config |
-| `bin/deep-research` | Full loop: recall → multi-search → extract → outbox → gaps → index |
-| `bin/gaps-review` | Failure/coverage checklist |
+| `bin/deep-research` | Full loop: recall → search → cascade extract → outbox → gaps → index |
+| `bin/research-gate` | Code judge — block reply until harness passes |
+| `bin/gaps-review` | Failure/coverage/tier checklist |
 | `bin/memory-*` | pgvector recall/index/reembed |
+| `scripts/research-memory/extract_cascade.py` | trafilatura → Playwright waterfall |
 | `scripts/research-memory/embed_client.py` | OpenAI-first embeddings |
 | `hermes/SOUL.md` | Harness-first + Goodresearch rules |
 
